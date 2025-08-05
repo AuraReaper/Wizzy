@@ -18,7 +18,7 @@ class ChatHistory(Base):
     message_type = Column(String(20), nullable=False)  # 'human' or 'ai'
     content = Column(Text, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
-    metadata = Column(JSON, default={})  # For additional message metadata
+    message_metadata = Column(JSON, default={})  # For additional message metadata
 
 class DocumentContext(Base):
     """Store uploaded documents and their content"""
@@ -32,7 +32,7 @@ class DocumentContext(Base):
     file_type = Column(String(20))
     file_size = Column(Integer)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
-    metadata = Column(JSON, default={})
+    file_metadata = Column(JSON, default={})
 
 class UserSession(Base):
     """Store user session information"""
