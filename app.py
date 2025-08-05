@@ -21,9 +21,9 @@ from dotenv import load_dotenv
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from persistent_memory import DatabaseChatMessageHistory, DatabaseDocumentManager, UserSessionManager
 
 # Load environment variables
 load_dotenv()
@@ -54,11 +54,9 @@ class WizzyBot:
         # Use requests for direct API calls instead of deprecated GoogleGenerativeAI
         self.gemini_api_base = "https://generativelanguage.googleapis.com/v1beta"
 
-        # Memory storage for conversations
-        self.chat_histories = {}
-        
-        # Document storage for sessions
-        self.document_contexts = {}
+        # Initialize persistent storage managers
+        self.document_manager = DatabaseDocumentManager()
+        self.session_manager = UserSessionManager()
         
         # Create the chat prompt template with memory
         self.prompt = ChatPromptTemplate.from_messages([
@@ -78,12 +76,9 @@ class WizzyBot:
             history_messages_key="history",
         )
 
-    def get_session_history(self, session_id: str) -> ChatMessageHistory:
-        """Get or create chat message history for a session"""
-        if session_id not in self.chat_histories:
-            self.chat_histories[session_id] = ChatMessageHistory()
-            logger.info(f"Created conversation history for session {session_id}")
-        return self.chat_histories[session_id]
+    def get_session_history(self, session_id: str) -> DatabaseChatMessageHistory:
+        """Get or create database-backed chat message history for a session"""
+        return DatabaseChatMessageHistory(session_id)
 
     def create_system_message(self, user_name: str, chat_id: str = None) -> str:
         """Create dynamic system message with optional document context"""
@@ -98,9 +93,10 @@ You are currently talking to {user_name}.
 The current date and time is {current_time}"""
         
         # Add document context if available
-        if chat_id and chat_id in self.document_contexts:
-            doc_info = self.document_contexts[chat_id]
-            base_message += f"""
+        if chat_id:
+            doc_info = self.document_manager.get_document(chat_id)
+            if doc_info:
+                base_message += f"""
 
 ## Document Context Available:
 The user has uploaded a document: {doc_info['filename']}
@@ -300,15 +296,22 @@ Document summary: {doc_info.get('summary', 'Content available for discussion')}"
             except:
                 summary = f"Document with {len(text.split())} words uploaded."
             
-            # Store document context
-            self.document_contexts[chat_id] = {
-                'filename': filename,
-                'content': text,
-                'summary': summary,
-                'uploaded_at': datetime.now().isoformat()
-            }
+            # Store document in database
+            file_size = len(document_data)
+            success = self.document_manager.store_document(
+                session_id=chat_id,
+                filename=filename,
+                content=text,
+                summary=summary,
+                file_type=file_extension,
+                file_size=file_size
+            )
             
-            logger.info(f"Document {filename} processed for chat {chat_id}")
+            if not success:
+                logger.error(f"Failed to store document {filename} for chat {chat_id}")
+                return f"Sorry, I couldn't save your document. Please try again."
+            
+            logger.info(f"Document {filename} processed and stored for chat {chat_id}")
             
             return f"📄 Great! I've processed your document '{filename}' and I'm ready to answer questions about it!\n\n📝 **Summary:** {summary}\n\nJust ask me anything about the document!"
         
@@ -514,10 +517,28 @@ def health():
     """Health check endpoint"""
     return jsonify({'status': 'healthy', 'service': 'Wizzy Bot'})
 
-if __name__ == '__main__':
-    # Set up webhook URL with your domain
-    webhook_url = os.getenv('WEBHOOK_URL', 'https://your-domain.com/webhook')
+# Add production health check endpoint
+@app.route('/', methods=['GET'])
+def root():
+    """Root endpoint for basic health check"""
+    return jsonify({
+        'status': 'healthy', 
+        'service': 'Wizzy Bot',
+        'version': '1.0.0',
+        'message': 'Bot is running successfully!'
+    })
 
+def setup_webhook():
+    """Setup Telegram webhook"""
+    # Auto-detect webhook URL from Render environment
+    render_service_url = os.getenv('RENDER_EXTERNAL_URL')
+    webhook_url = os.getenv('WEBHOOK_URL')
+    
+    if render_service_url and not webhook_url:
+        webhook_url = f"{render_service_url}/webhook"
+    elif not webhook_url:
+        webhook_url = 'https://your-domain.com/webhook'
+    
     try:
         # Set webhook using requests to avoid async issues
         url = f"https://api.telegram.org/bot{wizzy.telegram_token}/setWebhook"
@@ -525,9 +546,19 @@ if __name__ == '__main__':
         response = requests.post(url, json=data)
         response.raise_for_status()
         logger.info(f"Webhook set to: {webhook_url}")
+        return True
     except Exception as e:
         logger.error(f"Error setting webhook: {e}")
+        return False
 
+if __name__ == '__main__':
+    # Setup webhook
+    setup_webhook()
+    
     # Run Flask app
     port = int(os.getenv('PORT', 8000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    debug_mode = os.getenv('ENVIRONMENT') == 'development'
+    app.run(host='0.0.0.0', port=port, debug=debug_mode)
+else:
+    # Production mode (when run with gunicorn)
+    setup_webhook()

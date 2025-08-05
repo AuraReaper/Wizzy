@@ -9,3 +9,9 @@ requests
 python-dotenv
 gunicorn
 pydantic
+sqlalchemy
+psycopg2-binary
+alembic
+PyPDF2
+python-docx
+lxml

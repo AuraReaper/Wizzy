@@ -1,6 +1,8 @@
 # Environment variables
 .env
 
+DEPLOYMENT.md
+
 # Python
 __pycache__/
 *.py[cod]
