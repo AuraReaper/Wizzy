@@ -39,6 +39,10 @@ class WizzyBot:
         self.google_api_key = os.getenv('GOOGLE_API_KEY')
         self.groq_api_key = os.getenv('GROQ_API_KEY')
         self.redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+        
+        # Quota cooldown tracking
+        self.quota_cooldown_until = None
+        self.cooldown_duration = 3600  # 1 hour in seconds
 
         # Initialize services
         self.bot = Bot(token=self.telegram_token)
@@ -79,6 +83,41 @@ class WizzyBot:
     def get_session_history(self, session_id: str) -> DatabaseChatMessageHistory:
         """Get or create database-backed chat message history for a session"""
         return DatabaseChatMessageHistory(session_id)
+    
+    def is_in_quota_cooldown(self) -> bool:
+        """Check if we're in quota cooldown period"""
+        if self.quota_cooldown_until is None:
+            return False
+        current_time = datetime.now().timestamp()
+        return current_time < self.quota_cooldown_until
+    
+    def enter_quota_cooldown(self):
+        """Enter quota cooldown mode for 1 hour"""
+        current_time = datetime.now().timestamp()
+        self.quota_cooldown_until = current_time + self.cooldown_duration
+        logger.warning(f"Entered quota cooldown until {datetime.fromtimestamp(self.quota_cooldown_until)}")
+    
+    def get_cooldown_message(self) -> str:
+        """Get cooldown message showing remaining time"""
+        if not self.is_in_quota_cooldown():
+            return "I'm back online! 🎉"
+        
+        current_time = datetime.now().timestamp()
+        remaining_minutes = int((self.quota_cooldown_until - current_time) / 60)
+        
+        if remaining_minutes > 60:
+            remaining_hours = remaining_minutes // 60
+            return f"🚫 I'm in timeout mode! API quota exceeded. I'll be back in about {remaining_hours} hour{'s' if remaining_hours != 1 else ''}. My creator needs to pay for more API calls! 😴💸"
+        else:
+            return f"🚫 I'm in timeout mode! API quota exceeded. I'll be back in about {remaining_minutes} minute{'s' if remaining_minutes != 1 else ''}. Taking a forced nap! 😴💸"
+    
+    def handle_quota_error(self, context: str = "processing") -> str:
+        """Handle quota error and enter cooldown"""
+        if not self.is_in_quota_cooldown():
+            self.enter_quota_cooldown()
+            return f"Hey, I think the API quota limit reached! 🙄 I'm going into timeout mode for 1 hour to avoid spamming you with error messages. Try again later when my creator hopefully pays for more API credits! 😏💸"
+        else:
+            return self.get_cooldown_message()
 
     def create_system_message(self, user_name: str, chat_id: str = None) -> str:
         """Create dynamic system message with optional document context"""
@@ -352,6 +391,10 @@ Document summary: {doc_info.get('summary', 'Content available for discussion')}"
 
     def process_text_message(self, message_data: Dict[str, Any]) -> str:
         """Process text message through AI agent with memory"""
+        # Check if we're in cooldown mode first
+        if self.is_in_quota_cooldown():
+            return self.get_cooldown_message()
+        
         try:
             chat_id = str(message_data['chat']['id'])
             user_name = message_data['from']['first_name'].split(' ')[0]
@@ -376,7 +419,7 @@ Document summary: {doc_info.get('summary', 'Content available for discussion')}"
             # Check if it's likely an API quota error
             error_str = str(e).lower()
             if any(keyword in error_str for keyword in ['quota', 'limit', 'rate', 'exceeded', '429']):
-                return "Hey, I think the API quota limit reached! 🙄 Looks like I've been too chatty today. Try again in a bit, or blame my creator for being too cheap to pay for more API calls! 😏"
+                return self.handle_quota_error("text processing")
             return "Sorry, I encountered an error processing your message."
 
     def process_audio_message(self, message_data: Dict[str, Any]) -> str:
