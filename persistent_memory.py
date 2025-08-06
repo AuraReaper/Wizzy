@@ -5,7 +5,8 @@ from typing import List, Optional
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from models import ChatHistory, DocumentContext, UserSession, get_database_manager
-from datetime import datetime
+from datetime import datetime, timedelta
+from sqlalchemy import desc
 import logging
 
 logger = logging.getLogger(__name__)
@@ -26,12 +27,16 @@ class DatabaseChatMessageHistory(BaseChatMessageHistory):
         return self._messages
     
     def _load_messages(self):
-        """Load messages from database"""
+        """Load messages from database (latest 20 messages only)"""
         session = self.db_manager.get_session()
         try:
+            # Get only the latest 20 messages for this session
             chat_records = session.query(ChatHistory).filter(
                 ChatHistory.session_id == self.session_id
-            ).order_by(ChatHistory.timestamp).all()
+            ).order_by(desc(ChatHistory.timestamp)).limit(20).all()
+            
+            # Reverse to get chronological order (oldest first)
+            chat_records.reverse()
             
             self._messages = []
             for record in chat_records:
@@ -53,6 +58,9 @@ class DatabaseChatMessageHistory(BaseChatMessageHistory):
         """Add a message to the database"""
         session = self.db_manager.get_session()
         try:
+            # Auto-cleanup old messages before adding new one
+            self._cleanup_old_messages(session)
+            
             # Determine message type
             if isinstance(message, HumanMessage):
                 message_type = 'human'
@@ -75,6 +83,9 @@ class DatabaseChatMessageHistory(BaseChatMessageHistory):
             # Update in-memory cache
             if self._messages is not None:
                 self._messages.append(message)
+                # Keep only latest 20 in memory cache
+                if len(self._messages) > 20:
+                    self._messages = self._messages[-20:]
                 
             # Update user session stats
             self._update_user_session(session)
@@ -84,6 +95,25 @@ class DatabaseChatMessageHistory(BaseChatMessageHistory):
             session.rollback()
         finally:
             self.db_manager.close_session(session)
+    
+    def _cleanup_old_messages(self, session):
+        """Auto-delete messages older than 1 day for this session"""
+        try:
+            # Calculate cutoff time (1 day ago)
+            cutoff_time = datetime.utcnow() - timedelta(days=1)
+            
+            # Delete messages older than 1 day for this session
+            deleted_count = session.query(ChatHistory).filter(
+                ChatHistory.session_id == self.session_id,
+                ChatHistory.timestamp < cutoff_time
+            ).delete()
+            
+            if deleted_count > 0:
+                logger.info(f"Auto-deleted {deleted_count} old messages for session {self.session_id}")
+            
+            session.commit()
+        except Exception as e:
+            logger.error(f"Error cleaning up old messages: {e}")
     
     def _update_user_session(self, session):
         """Update user session statistics"""
@@ -231,3 +261,62 @@ class UserSessionManager:
             session.rollback()
         finally:
             self.db_manager.close_session(session)
+
+
+# Global cleanup functions
+def cleanup_all_old_messages():
+    """Cleanup old messages across all sessions (useful for scheduled cleanup)"""
+    try:
+        db_manager = get_database_manager()
+        session = db_manager.get_session()
+        
+        # Calculate cutoff time (1 day ago)
+        cutoff_time = datetime.utcnow() - timedelta(days=1)
+        
+        # Delete all messages older than 1 day across all sessions
+        deleted_count = session.query(ChatHistory).filter(
+            ChatHistory.timestamp < cutoff_time
+        ).delete()
+        
+        session.commit()
+        
+        if deleted_count > 0:
+            logger.info(f"Global cleanup: Deleted {deleted_count} old messages across all sessions")
+        
+        return deleted_count
+        
+    except Exception as e:
+        logger.error(f"Error in global cleanup: {e}")
+        session.rollback()
+        return 0
+    finally:
+        db_manager.close_session(session)
+
+
+def cleanup_old_documents(days: int = 7):
+    """Cleanup old documents (default: 7 days)"""
+    try:
+        db_manager = get_database_manager()
+        session = db_manager.get_session()
+        
+        # Calculate cutoff time
+        cutoff_time = datetime.utcnow() - timedelta(days=days)
+        
+        # Delete old documents
+        deleted_count = session.query(DocumentContext).filter(
+            DocumentContext.uploaded_at < cutoff_time
+        ).delete()
+        
+        session.commit()
+        
+        if deleted_count > 0:
+            logger.info(f"Document cleanup: Deleted {deleted_count} old documents older than {days} days")
+        
+        return deleted_count
+        
+    except Exception as e:
+        logger.error(f"Error in document cleanup: {e}")
+        session.rollback()
+        return 0
+    finally:
+        db_manager.close_session(session)
