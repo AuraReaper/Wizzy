@@ -161,6 +161,10 @@ Document summary: {doc_info.get('summary', 'Content available for discussion')}"
 
         except Exception as e:
             logger.error(f"Error transcribing audio: {e}")
+            # Check if it's likely an API quota error
+            error_str = str(e).lower()
+            if any(keyword in error_str for keyword in ['quota', 'limit', 'rate', 'exceeded', '429']):
+                return "Hey, I think the API quota limit reached! 🙄 Can't transcribe your voice message right now. Try again later when my creator hopefully pays for more API credits! 😏"
             return "Sorry, I couldn't transcribe the audio."
 
     def analyze_image(self, image_data: bytes, caption: Optional[str] = None) -> str:
@@ -201,6 +205,10 @@ Document summary: {doc_info.get('summary', 'Content available for discussion')}"
 
         except Exception as e:
             logger.error(f"Error analyzing image: {e}")
+            # Check if it's likely an API quota error
+            error_str = str(e).lower()
+            if any(keyword in error_str for keyword in ['quota', 'limit', 'rate', 'exceeded', '429']):
+                return "Hey, I think the API quota limit reached! 🙄 Can't analyze your image right now. Apparently, I've been too busy looking at pictures today! Try again when the budget allows. 😏"
             return "Sorry, I couldn't analyze the image."
 
     def generate_speech(self, text: str) -> bytes:
@@ -365,6 +373,10 @@ Document summary: {doc_info.get('summary', 'Content available for discussion')}"
 
         except Exception as e:
             logger.error(f"Error processing text message: {e}")
+            # Check if it's likely an API quota error
+            error_str = str(e).lower()
+            if any(keyword in error_str for keyword in ['quota', 'limit', 'rate', 'exceeded', '429']):
+                return "Hey, I think the API quota limit reached! 🙄 Looks like I've been too chatty today. Try again in a bit, or blame my creator for being too cheap to pay for more API calls! 😏"
             return "Sorry, I encountered an error processing your message."
 
     def process_audio_message(self, message_data: Dict[str, Any]) -> str:
