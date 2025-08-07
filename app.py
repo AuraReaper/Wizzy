@@ -276,62 +276,18 @@ Document summary: {doc_info.get('summary', 'Content available for discussion')}"
             return "Sorry, I couldn't analyze the image."
 
     def search_web(self, query: str, num_results: int = 5) -> Dict[str, Any]:
-        """Search the web using Serper API for external knowledge"""
+        """Search the web using enhanced Serper API client"""
         try:
-            if not self.serper_api_key:
+            if not self.serper_client:
                 return {
                     "success": False,
                     "error": "Serper API key not configured",
                     "results": []
                 }
             
-            url = f"{self.serper_api_base}/search"
-            headers = {
-                "X-API-KEY": self.serper_api_key,
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "q": query,
-                "num": num_results
-            }
-            
-            response = requests.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            
-            search_data = response.json()
-            
-            # Extract relevant information
-            results = []
-            
-            # Process organic results
-            if 'organic' in search_data:
-                for result in search_data['organic'][:num_results]:
-                    results.append({
-                        "title": result.get('title', ''),
-                        "snippet": result.get('snippet', ''),
-                        "link": result.get('link', ''),
-                        "position": result.get('position', 0)
-                    })
-            
-            # Add knowledge graph if available
-            knowledge_graph = None
-            if 'knowledgeGraph' in search_data:
-                kg = search_data['knowledgeGraph']
-                knowledge_graph = {
-                    "title": kg.get('title', ''),
-                    "type": kg.get('type', ''),
-                    "description": kg.get('description', ''),
-                    "attributes": kg.get('attributes', {})
-                }
-            
-            return {
-                "success": True,
-                "query": query,
-                "results": results,
-                "knowledge_graph": knowledge_graph,
-                "total_results": len(results)
-            }
+            # Use enhanced SerperAPI client
+            result = self.serper_client.web_search(query, num_results)
+            return result
             
         except Exception as e:
             logger.error(f"Error searching web with Serper: {e}")
@@ -346,21 +302,8 @@ Document summary: {doc_info.get('summary', 'Content available for discussion')}"
         if not search_data["success"] or not search_data["results"]:
             return "No search results found or search failed."
         
-        formatted_results = f"Web search results for: '{search_data['query']}'\n\n"
-        
-        # Add knowledge graph if available
-        if search_data.get("knowledge_graph"):
-            kg = search_data["knowledge_graph"]
-            formatted_results += f"**{kg['title']}** ({kg['type']})\n"
-            formatted_results += f"{kg['description']}\n\n"
-        
-        # Add organic results
-        for i, result in enumerate(search_data["results"], 1):
-            formatted_results += f"{i}. **{result['title']}**\n"
-            formatted_results += f"   {result['snippet']}\n"
-            formatted_results += f"   Source: {result['link']}\n\n"
-        
-        return formatted_results
+        # Use enhanced SearchFormatter for better formatting
+        return SearchFormatter.format_for_ai_context(search_data)
     
     def should_search_web(self, query: str) -> bool:
         """Determine if a query requires web search for current information"""
