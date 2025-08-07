@@ -5,8 +5,9 @@ import requests
 import base64
 import asyncio
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pathlib import Path
+import json
 
 # Document processing imports
 import PyPDF2
@@ -24,6 +25,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from persistent_memory import DatabaseChatMessageHistory, DatabaseDocumentManager, UserSessionManager
+from serper_tools import SerperAPI, SearchFormatter
 
 # Load environment variables
 load_dotenv()
@@ -38,6 +40,7 @@ class WizzyBot:
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
         self.google_api_key = os.getenv('GOOGLE_API_KEY')
         self.groq_api_key = os.getenv('GROQ_API_KEY')
+        self.serper_api_key = os.getenv('SERPER_API_KEY')
         self.redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
         
         # Quota cooldown tracking
@@ -57,10 +60,19 @@ class WizzyBot:
 
         # Use requests for direct API calls instead of deprecated GoogleGenerativeAI
         self.gemini_api_base = "https://generativelanguage.googleapis.com/v1beta"
+        
+        # Serper API configuration
+        self.serper_api_base = "https://google.serper.dev"
 
         # Initialize persistent storage managers
         self.document_manager = DatabaseDocumentManager()
         self.session_manager = UserSessionManager()
+        
+        # Initialize enhanced Serper API client
+        if self.serper_api_key:
+            self.serper_client = SerperAPI(self.serper_api_key)
+        else:
+            self.serper_client = None
         
         # Create the chat prompt template with memory
         self.prompt = ChatPromptTemplate.from_messages([
@@ -119,8 +131,8 @@ class WizzyBot:
         else:
             return self.get_cooldown_message()
 
-    def create_system_message(self, user_name: str, chat_id: str = None) -> str:
-        """Create dynamic system message with optional document context"""
+    def create_system_message(self, user_name: str, chat_id: str = None, search_context: str = None) -> str:
+        """Create dynamic system message with optional document context and search results"""
         current_time = datetime.now().isoformat()
         base_message = f"""You are a helpful assistant called Wizzy.
 Respond in a natural funny tone.
@@ -129,7 +141,18 @@ Don't give very long messages.
 
 You are currently talking to {user_name}.
 
-The current date and time is {current_time}"""
+The current date and time is {current_time}
+
+You have access to real-time web search capabilities to provide current information when needed."""
+        
+        # Add search context if available
+        if search_context:
+            base_message += f"""
+
+## Current Web Search Results:
+{search_context}
+
+Use this information to provide accurate, up-to-date answers. Always cite your sources when using web search results."""
         
         # Add document context if available
         if chat_id:
@@ -249,6 +272,150 @@ Document summary: {doc_info.get('summary', 'Content available for discussion')}"
             if any(keyword in error_str for keyword in ['quota', 'limit', 'rate', 'exceeded', '429']):
                 return "Hey, I think the API quota limit reached! 🙄 Can't analyze your image right now. Apparently, I've been too busy looking at pictures today! Try again when the budget allows. 😏"
             return "Sorry, I couldn't analyze the image."
+
+    def search_web(self, query: str, num_results: int = 5) -> Dict[str, Any]:
+        """Search the web using Serper API for external knowledge"""
+        try:
+            if not self.serper_api_key:
+                return {
+                    "success": False,
+                    "error": "Serper API key not configured",
+                    "results": []
+                }
+            
+            url = f"{self.serper_api_base}/search"
+            headers = {
+                "X-API-KEY": self.serper_api_key,
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "q": query,
+                "num": num_results
+            }
+            
+            response = requests.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            
+            search_data = response.json()
+            
+            # Extract relevant information
+            results = []
+            
+            # Process organic results
+            if 'organic' in search_data:
+                for result in search_data['organic'][:num_results]:
+                    results.append({
+                        "title": result.get('title', ''),
+                        "snippet": result.get('snippet', ''),
+                        "link": result.get('link', ''),
+                        "position": result.get('position', 0)
+                    })
+            
+            # Add knowledge graph if available
+            knowledge_graph = None
+            if 'knowledgeGraph' in search_data:
+                kg = search_data['knowledgeGraph']
+                knowledge_graph = {
+                    "title": kg.get('title', ''),
+                    "type": kg.get('type', ''),
+                    "description": kg.get('description', ''),
+                    "attributes": kg.get('attributes', {})
+                }
+            
+            return {
+                "success": True,
+                "query": query,
+                "results": results,
+                "knowledge_graph": knowledge_graph,
+                "total_results": len(results)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error searching web with Serper: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "results": []
+            }
+    
+    def format_search_results(self, search_data: Dict[str, Any]) -> str:
+        """Format search results into a readable context for the AI"""
+        if not search_data["success"] or not search_data["results"]:
+            return "No search results found or search failed."
+        
+        formatted_results = f"Web search results for: '{search_data['query']}'\n\n"
+        
+        # Add knowledge graph if available
+        if search_data.get("knowledge_graph"):
+            kg = search_data["knowledge_graph"]
+            formatted_results += f"**{kg['title']}** ({kg['type']})\n"
+            formatted_results += f"{kg['description']}\n\n"
+        
+        # Add organic results
+        for i, result in enumerate(search_data["results"], 1):
+            formatted_results += f"{i}. **{result['title']}**\n"
+            formatted_results += f"   {result['snippet']}\n"
+            formatted_results += f"   Source: {result['link']}\n\n"
+        
+        return formatted_results
+    
+    def should_search_web(self, query: str) -> bool:
+        """Determine if a query requires web search for current information"""
+        query_lower = query.lower().strip()
+        
+        # Don't search for simple math questions
+        math_patterns = ['what is', 'what\'s']
+        simple_math_indicators = ['+', '-', '*', '/', '=', 'plus', 'minus', 'times', 'divided by']
+        
+        # Check if it's a simple math question
+        for pattern in math_patterns:
+            if pattern in query_lower:
+                # Check if it contains math indicators
+                if any(math_indicator in query_lower for math_indicator in simple_math_indicators):
+                    # Additional check for simple patterns like "what is 2+2"
+                    import re
+                    if re.search(r'what\s+is\s+\d+\s*[+\-*/]\s*\d+', query_lower):
+                        return False
+        
+        # Don't search for basic greetings and simple questions (using word boundaries)
+        import re
+        non_search_patterns = [
+            r'\bhello\b', r'\bhi\b', r'how are you', r'good morning', r'good evening',
+            r'tell me a joke', r'joke about', r'\bexplain\b', r'how do i', r'how to'
+        ]
+        
+        for pattern in non_search_patterns:
+            if re.search(pattern, query_lower):
+                return False
+        
+        # Keywords that suggest need for current/external information
+        search_indicators = [
+            # Time-sensitive queries
+            'today', 'yesterday', 'this week', 'this month', 'this year', 'recent', 'latest', 'current',
+            'now', 'currently', 'at the moment',
+            
+            # News and events
+            'news', 'breaking', 'update', 'happened', 'event', 'announcement',
+            
+            # Market/financial data
+            'price', 'stock', 'market', 'cryptocurrency', 'bitcoin', 'ethereum',
+            
+            # Weather
+            'weather', 'temperature', 'forecast', 'rain', 'snow',
+            
+            # Sports scores/results
+            'score', 'game', 'match', 'won', 'lost', 'championship',
+            
+            # Technology updates
+            'release', 'version', 'launch', 'new version',
+            
+            # Specific search requests
+            'search for', 'look up', 'find information', 'tell me about',
+            'who is', 'when did', 'where is', 'how much', 'search'
+        ]
+        
+        return any(indicator in query_lower for indicator in search_indicators)
 
     def generate_speech(self, text: str) -> bytes:
         """Generate speech using Groq TTS API"""
@@ -390,7 +557,7 @@ Document summary: {doc_info.get('summary', 'Content available for discussion')}"
             return "Sorry, I couldn't process your document. Please try again."
 
     def process_text_message(self, message_data: Dict[str, Any]) -> str:
-        """Process text message through AI agent with memory"""
+        """Process text message through AI agent with memory and optional web search"""
         # Check if we're in cooldown mode first
         if self.is_in_quota_cooldown():
             return self.get_cooldown_message()
@@ -400,8 +567,19 @@ Document summary: {doc_info.get('summary', 'Content available for discussion')}"
             user_name = message_data['from']['first_name'].split(' ')[0]
             text = message_data['text']
 
-            # Create system message with context (including document context if available)
-            system_message = self.create_system_message(user_name, chat_id)
+            # Check if we should search the web for current information
+            search_context = None
+            if self.should_search_web(text):
+                logger.info(f"Performing web search for query: {text}")
+                search_results = self.search_web(text, num_results=5)
+                if search_results["success"]:
+                    search_context = self.format_search_results(search_results)
+                    logger.info(f"Web search successful, found {search_results['total_results']} results")
+                else:
+                    logger.warning(f"Web search failed: {search_results.get('error', 'Unknown error')}")
+
+            # Create system message with context (including document context and search results)
+            system_message = self.create_system_message(user_name, chat_id, search_context)
 
             # Generate response using chain with memory
             response = self.chain_with_history.invoke(
