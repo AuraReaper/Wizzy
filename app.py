@@ -4,6 +4,8 @@ import logging
 import requests
 import base64
 import asyncio
+import threading
+import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from pathlib import Path
@@ -24,7 +26,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from persistent_memory import DatabaseChatMessageHistory, DatabaseDocumentManager, UserSessionManager
+from persistent_memory import DatabaseChatMessageHistory, DatabaseDocumentManager, UserSessionManager, cleanup_all_old_messages, cleanup_old_documents
 from serper_tools import SerperAPI, SearchFormatter
 
 # Load environment variables
@@ -730,9 +732,41 @@ Document summary: {doc_info.get('summary', 'Content available for discussion')}"
             if chat_id:
                 self.send_text_response(chat_id, "Sorry, I encountered an error.")
 
+# Background cleanup task
+def scheduled_cleanup():
+    """Background task to cleanup old data every hour"""
+    while True:
+        try:
+            # Wait 1 hour between cleanups
+            time.sleep(3600)  # 3600 seconds = 1 hour
+            
+            logger.info("Starting scheduled cleanup...")
+            
+            # Cleanup old messages (older than 1 day)
+            messages_deleted = cleanup_all_old_messages()
+            
+            # Cleanup old documents (older than 7 days)
+            documents_deleted = cleanup_old_documents(days=7)
+            
+            logger.info(f"Scheduled cleanup completed: {messages_deleted} messages, {documents_deleted} documents deleted")
+            
+        except Exception as e:
+            logger.error(f"Error in scheduled cleanup: {e}")
+            # Continue running even if cleanup fails
+            time.sleep(3600)  # Wait 1 hour before retrying
+
+def start_background_tasks():
+    """Start background cleanup tasks"""
+    cleanup_thread = threading.Thread(target=scheduled_cleanup, daemon=True)
+    cleanup_thread.start()
+    logger.info("Background cleanup task started")
+
 # Flask app setup
 app = Flask(__name__)
 wizzy = WizzyBot()
+
+# Start background cleanup tasks
+start_background_tasks()
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
